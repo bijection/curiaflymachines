@@ -1,0 +1,200 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Curia Admin</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; }
+        .card-stat { transition: transform 0.2s; }
+        .card-stat:hover { transform: translateY(-2px); }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark mb-4">
+        <div class="container">
+            <span class="navbar-brand mb-0 h1">Curia Machine Manager</span>
+            <a href="/admin" class="btn btn-outline-light btn-sm">Refresh</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Stats Row -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card card-stat text-center shadow-sm">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-muted">Total Deployments</h6>
+                        <h2 class="display-4" id="total-deployments">-</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card card-stat text-center shadow-sm">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-muted">Active Machines</h6>
+                        <h2 class="display-4 text-success" id="active-machines">-</h2>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls & Table -->
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h4 class="mb-0">Recent Deployments</h4>
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#deployModal">
+                Test Deployment
+            </button>
+        </div>
+
+        <div class="card shadow-sm">
+            <div class="table-responsive">
+                <table class="table table-hover mb-0 align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>ID</th>
+                            <th>Subdomain</th>
+                            <th>Session</th>
+                            <th>Machine ID</th>
+                            <th>Created</th>
+                            <th>Last Access</th>
+                        </tr>
+                    </thead>
+                    <tbody id="deployments-table">
+                        <tr><td colspan="6" class="text-center py-3">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Test Deploy Modal -->
+    <div class="modal fade" id="deployModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Create Test Deployment</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="deployForm">
+                        <div class="row g-3">
+                            <div class="col-md-4">
+                                <label class="form-label">Session ID</label>
+                                <input type="number" class="form-control" name="sessionId" value="101" required>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Block ID</label>
+                                <input type="number" class="form-control" name="blockId" value="1" required>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Gen ID</label>
+                                <input type="number" class="form-control" name="generationId" value="1" required>
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label">Fileset (JSON format: path -> s3key)</label>
+                                <textarea class="form-control font-monospace" name="fileset" rows="4" style="font-size: 0.9em;">{
+  "Dockerfile": "test-assets/Dockerfile",
+  "index.html": "test-assets/index.html"
+}</textarea>
+                                <div class="form-text">Ensure S3 keys exist in the configured bucket.</div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button type="button" class="btn btn-primary" onclick="submitDeploy()">Deploy</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Fetch Stats
+        fetch('/api/admin/stats')
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('total-deployments').textContent = data.totalDeployments;
+                document.getElementById('active-machines').textContent = data.activeMachines;
+            })
+            .catch(err => console.error('Stats error:', err));
+
+        // Fetch Deployments
+        fetch('/api/admin/deployments')
+            .then(res => res.json())
+            .then(data => {
+                const tbody = document.getElementById('deployments-table');
+                if (data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="text-center py-3">No deployments found</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = data.map(d => {
+                    const active = !!d.machine_id;
+                    const badge = active 
+                        ? `<span class="badge bg-success">${d.machine_id.substring(0,8)}...</span>` 
+                        : `<span class="badge bg-secondary">Stopped</span>`;
+                    
+                    return `
+                        <tr>
+                            <td>${d.id}</td>
+                            <td><a href="http://${d.subdomain}.curia.site" target="_blank" class="text-decoration-none">${d.subdomain}</a></td>
+                            <td>${d.session_id}</td>
+                            <td>${badge}</td>
+                            <td class="small text-muted">${new Date(d.created_at).toLocaleString()}</td>
+                            <td class="small text-muted">${new Date(d.last_access).toLocaleString()}</td>
+                        </tr>
+                    `;
+                }).join('');
+            })
+            .catch(err => {
+                console.error('Table error:', err);
+                document.getElementById('deployments-table').innerHTML = '<tr><td colspan="6" class="text-center text-danger">Error loading data</td></tr>';
+            });
+
+        // Submit Deployment
+        async function submitDeploy() {
+            const form = document.getElementById('deployForm');
+            const btn = document.querySelector('#deployModal .btn-primary');
+            const originalText = btn.textContent;
+            
+            try {
+                // Parse form
+                const payload = {
+                    sessionId: parseInt(form.sessionId.value),
+                    blockId: parseInt(form.blockId.value),
+                    generationId: parseInt(form.generationId.value),
+                    parentGenerationIds: [],
+                    fileset: JSON.parse(form.fileset.value)
+                };
+
+                btn.disabled = true;
+                btn.textContent = "Deploying...";
+
+                const res = await fetch('/deploy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await res.json();
+                
+                if (res.ok) {
+                    alert('Success! Subdomain: ' + result.subdomain);
+                    location.reload();
+                } else {
+                    throw new Error(result.error || 'Unknown error');
+                }
+
+            } catch (e) {
+                alert('Deployment Failed: ' + e.message);
+                btn.disabled = false;
+                btn.textContent = originalText;
+            }
+        }
+    </script>
+</body>
+</html>
