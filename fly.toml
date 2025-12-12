@@ -1,20 +1,22 @@
+# fly.toml app configuration file generated for curia-machine-manager on 2025-12-11T21:58:25-08:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-# fly.toml app configuration file generated for curia-machine-manager
-
-app = "curia-machine-manager"
-primary_region = "ord"
+app = 'curia-machine-manager'
+primary_region = 'sjc'
 
 [build]
 
 [http_service]
   internal_port = 3000
   force_https = true
-  auto_stop_machines = true
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]
+  processes = ['app']
 
 [[vm]]
-  cpu_kind = "shared"
-  cpus = 1
-  memory_mb = 512
+  memory = '2gb'
+  cpus = 2
+  memory_mb = 2048
