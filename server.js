@@ -158,7 +158,7 @@ async function deployMachineLogic(subdomain) {
     // and run it as a machine. The output is requested in JSON to parse the ID.
     // If the app doesn't exist, this might fail depending on flyctl version, 
     // assuming app exists or is created beforehand.
-    const cmd = `flyctl machine run . --app ${appName} --detach --format json`;
+    const cmd = `flyctl machine run . --app ${appName} --detach --json`;
     
     const { stdout } = await execPromise(cmd, { cwd: tempDir });
     
