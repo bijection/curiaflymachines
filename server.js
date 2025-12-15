@@ -16,6 +16,8 @@ const pipeline = promisify(stream.pipeline);
 // --- Configuration ---
 const PORT = process.env.PORT || 3000;
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME;
+// Default region for machines; can be overridden via env
+const DEFAULT_REGION = process.env.FLY_MACHINE_REGION || process.env.FLY_REGION || 'sjc';
 
 // --- Database Setup ---
 const pool = new Pool({
@@ -78,6 +80,70 @@ async function downloadFileset(fileset, destinationDir) {
   }
 }
 
+// Helper: run a shell command and log stdout/stderr
+async function runCmd(cmd, opts = {}) {
+  try {
+    const { stdout, stderr } = await execPromise(cmd, opts);
+    if (stdout?.trim()) console.log(stdout.trim());
+    if (stderr?.trim()) console.error(stderr.trim());
+    return { stdout, stderr };
+  } catch (e) {
+    // Surface combined output for easier debugging
+    const out = e.stdout || '';
+    const err = e.stderr || e.message || '';
+    console.error(`Command failed: ${cmd}\n${out}\n${err}`);
+    throw e;
+  }
+}
+
+// Helper: Ensure Fly app exists (machines platform)
+async function ensureAppExists(appName) {
+  try {
+    await runCmd(`flyctl apps show ${appName} --json`);
+    return;
+  } catch (_) {
+    console.log(`App ${appName} not found. Creating...`);
+    // --machines ensures Machines platform
+    await runCmd(`flyctl apps create ${appName} --machines --yes`);
+  }
+}
+
+// Helper: Build an image remotely without deploying and return its reference
+async function buildImage(tempDir, appName, imageLabel) {
+  // Build remotely, push to Fly registry, but do not deploy
+  // image will be available at registry.fly.io/${appName}:${imageLabel}
+  const buildCmd = `flyctl deploy --app ${appName} --remote-only --build-only --image-label ${imageLabel}`;
+  await runCmd(buildCmd, { cwd: tempDir });
+  return `registry.fly.io/${appName}:${imageLabel}`;
+}
+
+// Helper: Run a machine from a given image and return machine ID
+async function runMachine(appName, imageRef, region = DEFAULT_REGION) {
+  // Expose HTTP on 80/443 to internal port 3000 used by the Dockerfile
+  const runCmdStr = [
+    'flyctl machine run',
+    imageRef,
+    `--app ${appName}`,
+    `--region ${region}`,
+    '--detach',
+    '--format json',
+    '--autostart',
+    '--autostop',
+    '--port 80:3000/tcp',
+    '--port 443:3000/tcp'
+  ].join(' ');
+  const { stdout } = await runCmd(runCmdStr);
+  let machineId;
+  try {
+    const output = JSON.parse(stdout);
+    machineId = output.id || (Array.isArray(output) && output[0]?.id);
+  } catch {
+    console.error('Failed to parse JSON from machine run:', stdout);
+  }
+  if (!machineId) throw new Error('Deployment failed: Could not parse machine ID');
+  return machineId;
+}
+
 // Helper: Prune old machines (LRU) if > 30 per session
 async function pruneMachines(sessionId) {
   const client = await pool.connect();
@@ -101,15 +167,15 @@ async function pruneMachines(sessionId) {
 
       if (lruRes.rows.length > 0) {
         const victim = lruRes.rows[0];
+        const appName = `curia-session-${sessionId}`;
         console.log(`Pruning machine ${victim.machine_id} for subdomain ${victim.subdomain} (Session: ${sessionId})`);
 
         // Destroy via flyctl
         try {
-            // --force ensures it's destroyed even if running
-            await execPromise(`flyctl machine destroy ${victim.machine_id} --force`);
+            await runCmd(`flyctl machine destroy ${victim.machine_id} --app ${appName} --force`);
         } catch (e) {
             console.error(`Failed to destroy machine ${victim.machine_id}:`, e.message);
-            // We continue to remove it from DB so we don't get stuck in a loop
+            // Continue to remove it from DB so we don't get stuck in a loop
         }
 
         // Update DB to reflect machine is gone
@@ -146,42 +212,28 @@ async function deployMachineLogic(subdomain) {
     console.log(`Downloading files for ${subdomain}...`);
     await downloadFileset(deploymentRecord.fileset, tempDir);
 
-    // 2. Deploy using Flyctl
-    // We assume the temp folder has a Dockerfile as per prompt instructions.
-    // We use `flyctl machine run` with remote build.
-    // App name format: curia-session-[sessionId]
+    // 2. Ensure app exists (Machines platform)
     const appName = `curia-session-${deploymentRecord.session_id}`;
-    
-    console.log(`Deploying to app ${appName}...`);
+    await ensureAppExists(appName);
 
-    // Note: 'flyctl machine run . --build-remote' attempts to build the local context remotely 
-    // and run it as a machine. The output is requested in JSON to parse the ID.
-    // If the app doesn't exist, this might fail depending on flyctl version, 
-    // assuming app exists or is created beforehand.
-    const cmd = `flyctl machine run . --app ${appName} --build-remote --region ord --detach --format json`;
-    
-    const { stdout } = await execPromise(cmd, { cwd: tempDir });
-    
-    let machineId;
-    try {
-        // flyctl returns json, usually an array or object with 'id'
-        const output = JSON.parse(stdout);
-        machineId = output.id || (Array.isArray(output) && output[0]?.id);
-        if (!machineId) throw new Error("No machine ID in output");
-    } catch (parseErr) {
-        console.error("Failed to parse flyctl output:", stdout);
-        throw new Error("Deployment failed: Could not parse machine ID");
-    }
+    // 3. Build image remotely without deploying
+    const imageLabel = subdomain; // tie image tag to subdomain for easy correlation
+    console.log(`Building image for app ${appName} (label: ${imageLabel})...`);
+    const imageRef = await buildImage(tempDir, appName, imageLabel);
+
+    // 4. Run machine from built image with proper HTTP ports
+    console.log(`Starting machine in region ${DEFAULT_REGION} for app ${appName}...`);
+    const machineId = await runMachine(appName, imageRef, DEFAULT_REGION);
 
     console.log(`Deployed machine: ${machineId}`);
 
-    // 3. Update DB
+    // 5. Update DB
     await pool.query(
       `UPDATE deployments SET machine_id = $1, last_access = NOW() WHERE subdomain = $2`,
       [machineId, subdomain]
     );
 
-    // 4. Prune if necessary
+    // 6. Prune if necessary
     await pruneMachines(deploymentRecord.session_id);
 
     return machineId;
@@ -330,7 +382,6 @@ app.use(async (req, res, next) => {
         // If no machine is running, deploy one
         if (!machineId) {
             console.log(`Cold start for ${subdomain}...`);
-            // This might take time, client will hang until deployed
             machineId = await deployMachineLogic(subdomain);
         } else {
             // Update last access time (async, don't await)
@@ -341,7 +392,6 @@ app.use(async (req, res, next) => {
         }
 
         // Fly Replay Logic
-        // We tell the Fly proxy to retry this request against the specific machine ID
         console.log(`Replaying request for ${subdomain} to machine ${machineId}`);
         res.set('fly-replay', `instance=${machineId}`);
         return res.status(200).send(`Replaying to ${machineId}`);
