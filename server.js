@@ -158,16 +158,20 @@ async function deployMachineLogic(subdomain) {
     // and run it as a machine. The output is requested in JSON to parse the ID.
     // If the app doesn't exist, this might fail depending on flyctl version, 
     // assuming app exists or is created beforehand.
-    const cmd = `flyctl machine run . --app ${appName} --detach --json`;
+    const cmd = `flyctl machine run . --app ${appName} --detach`;
     
     const { stdout } = await execPromise(cmd, { cwd: tempDir });
     
     let machineId;
     try {
-        // flyctl returns json, usually an array or object with 'id'
-        const output = JSON.parse(stdout);
-        machineId = output.id || (Array.isArray(output) && output[0]?.id);
-        if (!machineId) throw new Error("No machine ID in output");
+        // Using regex to find the machine ID in the output
+        const regex = /Machine ID: (\w+)/;
+        const match = stdout.match(regex);
+        if (match && match.length > 1) {
+            machineId = match[1];
+        } else {
+            throw new Error("No machine ID found in flyctl output");
+        }
     } catch (parseErr) {
         console.error("Failed to parse flyctl output:", stdout);
         throw new Error("Deployment failed: Could not parse machine ID");
