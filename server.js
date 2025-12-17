@@ -271,6 +271,12 @@ app.get('/api/admin/deployments', async (req, res) => {
 
 // 1. API Endpoint: /deploy
 app.post('/deploy', async (req, res) => {
+    // --- Bearer token check ---
+    const authHeader = req.get('authorization');
+    const expectedToken = process.env.DEPLOY_TOKEN;
+    if (!expectedToken || !authHeader || !authHeader.startsWith('Bearer ') || authHeader.slice(7).trim() !== expectedToken) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
     try {
         const { fileset, sessionId, blockId, generationId, parentGenerationIds } = req.body;
         
